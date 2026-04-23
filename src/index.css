@@ -1,1 +1,18 @@
 @import "tailwindcss";
+
+@theme {
+  --background-image-medical: url('https://storage.googleapis.com/mcp-user-content/ais-dev-76ag2f7xkjjepauux5obmp-207614664344.asia-southeast1.run.app/background.png');
+  --brand-blue: #6382D1;
+  --brand-pink: #D147A3;
+  --brand-green: #27AE60;
+  --brand-red: #EB5757;
+  --brand-grey: #F2F2F2;
+}
+
+body {
+  background-image: var(--background-image-medical);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
