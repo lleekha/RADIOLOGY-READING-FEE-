@@ -36,7 +36,8 @@ import {
   Square,
   CheckSquare,
   Database,
-  Layers
+  Layers,
+  History as HistoryIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import jsPDF from 'jspdf';
@@ -1033,6 +1034,120 @@ const RELEASE_TIMES = [
 export default function ClaimSlipGenerator({ onLogout, username, userModality }: ClaimSlipGeneratorProps) {
   const isSuperAdmin = username === 'ADMIN';
 
+  // Track user activity
+  useEffect(() => {
+    if (!username) return;
+
+    const updateActivity = () => {
+      const storedUsers = JSON.parse(localStorage.getItem('claim_slip_users') || '[]');
+      const updatedUsers = storedUsers.map((u: any) => {
+        if (u.username === username) {
+          return { ...u, lastActive: new Date().toISOString() };
+        }
+        return u;
+      });
+      localStorage.setItem('claim_slip_users', JSON.stringify(updatedUsers));
+    };
+
+    updateActivity(); // Initial update
+    const interval = setInterval(updateActivity, 60000); // Every minute
+    return () => clearInterval(interval);
+  }, [username]);
+
+  const handleAddModality = () => {
+    const modName = modalityInput.toUpperCase().trim();
+    if (modName && !modalities.includes(modName)) {
+      const updated = [...modalities, modName];
+      setModalities(updated);
+      localStorage.setItem('claim_slip_modalities', JSON.stringify(updated));
+      
+      // Audit Log
+      const newLog = {
+        timestamp: new Date().toISOString(),
+        user: username,
+        action: 'SYSTEM_CONFIG',
+        details: `Added new modality: ${modName}`
+      };
+      const updatedLogs = [newLog, ...systemLogs].slice(0, 100);
+      setSystemLogs(updatedLogs);
+      localStorage.setItem('claim_slip_logs', JSON.stringify(updatedLogs));
+      setShowAddModalityModal(false);
+      setModalityInput('');
+      showToast(`Modality ${modName} added successfully`);
+    } else if (modalities.includes(modName)) {
+      showToast('Modality already exists', 'error');
+    }
+  };
+  
+  const clearUserHistory = (usernameToClear: string, selectedItems?: Set<string>, onConfirmSuccess?: () => void) => {
+    const isSelective = selectedItems && selectedItems.size > 0;
+    const confirmMsg = isSelective 
+      ? `Are you sure you want to clear the ${selectedItems.size} selected login history items for ${usernameToClear}?`
+      : `Are you sure you want to clear all login history for ${usernameToClear}? It will be stored in cleared history.`;
+
+    setConfirmModal({
+      show: true,
+      title: isSelective ? 'Clear Selected History' : 'Clear All History',
+      message: confirmMsg,
+      confirmText: 'Confirm',
+      cancelText: 'Cancel',
+      variant: 'danger',
+      onConfirm: () => {
+        const storedUsers = JSON.parse(localStorage.getItem('claim_slip_users') || '[]');
+        const updatedUsers = storedUsers.map((u: any) => {
+          if (u.username === usernameToClear) {
+            const currentHistory = u.loginHistory || [];
+            const clearedHistory = u.clearedLoginHistory || [];
+            
+            if (isSelective) {
+              const toMove = currentHistory.filter((h: any) => selectedItems.has(h.timestamp));
+              const toKeep = currentHistory.filter((h: any) => !selectedItems.has(h.timestamp));
+              return { 
+                ...u, 
+                loginHistory: toKeep, 
+                clearedLoginHistory: [...toMove, ...clearedHistory] 
+              };
+            }
+
+            return { 
+              ...u, 
+              loginHistory: [], 
+              clearedLoginHistory: [...currentHistory, ...clearedHistory] 
+            };
+          }
+          return u;
+        });
+        localStorage.setItem('claim_slip_users', JSON.stringify(updatedUsers));
+        setUsers(updatedUsers);
+        
+        // Update selected user for history if it matches
+        if (selectedUserForHistory?.username === usernameToClear) {
+          const freshUser = updatedUsers.find((u: any) => u.username === usernameToClear);
+          setSelectedUserForHistory(freshUser);
+          setSelectedHistoryItems(new Set()); // Reset selection
+        }
+        
+        showToast(isSelective ? `Selected history items cleared for ${usernameToClear}` : `History cleared for ${usernameToClear}`);
+
+        // Audit Log
+        const newLog = {
+          timestamp: new Date().toISOString(),
+          user: username,
+          action: 'SYSTEM_CONFIG',
+          details: isSelective 
+            ? `Cleared ${selectedItems.size} selected login logs for ${usernameToClear}`
+            : `Cleared all login logs for ${usernameToClear}`
+        };
+        const updatedLogs = [newLog, ...systemLogs].slice(0, 100);
+        setSystemLogs(updatedLogs);
+        localStorage.setItem('claim_slip_logs', JSON.stringify(updatedLogs));
+        
+        setConfirmModal(prev => ({ ...prev, show: false }));
+        if (onConfirmSuccess) onConfirmSuccess();
+      }
+    });
+  };
+
   const isSplitNameModality = (m: string) => {
     return m === 'CT SCAN MAIN' || m === 'CT SCAN OPD' || m === 'X-RAY MAIN';
   };
@@ -1430,6 +1545,14 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
   const [showWarning, setShowWarning] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [showModalityManager, setShowModalityManager] = useState(false);
+  const [showAddModalityModal, setShowAddModalityModal] = useState(false);
+  const [modalityInput, setModalityInput] = useState('');
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [selectedUserForHistory, setSelectedUserForHistory] = useState<any>(null);
+  const [historyStartDate, setHistoryStartDate] = useState('');
+  const [historyEndDate, setHistoryEndDate] = useState('');
+  const [showClearedHistory, setShowClearedHistory] = useState(false);
+  const [selectedHistoryItems, setSelectedHistoryItems] = useState<Set<string>>(new Set());
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingRecord, setEditingRecord] = useState<ClaimRecord | null>(null);
   const [completorFilters, setCompletorFilters] = useState({
@@ -1447,6 +1570,9 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
   const [newModalityInput, setNewModalityInput] = useState('');
   const [editingModalityIndex, setEditingModalityIndex] = useState<number | null>(null);
   const [editingModalityValue, setEditingModalityValue] = useState('');
+  const [systemLogs, setSystemLogs] = useState<any[]>(() => {
+    return JSON.parse(localStorage.getItem('claim_slip_logs') || '[]');
+  });
   
   const [printData, setPrintData] = useState<ClaimRecord | null>(null);
   const [selectedPrinter, setSelectedPrinter] = useState(() => {
@@ -1905,6 +2031,18 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
     };
 
     setRecords([newRecord, ...records]);
+
+    // Audit Log
+    const newLog = {
+      timestamp: new Date().toISOString(),
+      user: username,
+      action: 'CREATE',
+      details: `Created record for ${newRecord.name} (${newRecord.refNo})`
+    };
+    const updatedLogs = [newLog, ...systemLogs].slice(0, 100);
+    setSystemLogs(updatedLogs);
+    localStorage.setItem('claim_slip_logs', JSON.stringify(updatedLogs));
+
     handlePrintTicket(newRecord);
     confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
   };
@@ -1914,6 +2052,7 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
     totalRecords: number;
     totalAmount: number;
     totalMaifippAmount: number;
+    totalPaidToCashierAmount: number;
     modalityBreakdown: { [modality: string]: { count: number; amount: number } };
   }
 
@@ -1942,6 +2081,7 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
           totalRecords: 0,
           totalAmount: 0,
           totalMaifippAmount: 0,
+          totalPaidToCashierAmount: 0,
           modalityBreakdown: {}
         };
       }
@@ -1950,6 +2090,9 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
       earningsMap[doctor].totalAmount += amount;
       if (r.isReportedToMAIFIPP) {
         earningsMap[doctor].totalMaifippAmount += amount;
+      }
+      if (r.isPaid) {
+        earningsMap[doctor].totalPaidToCashierAmount += amount;
       }
 
       if (!earningsMap[doctor].modalityBreakdown[modality]) {
@@ -1963,50 +2106,87 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
   };
 
   const exportEarningsToExcel = () => {
-    const data = getDoctorEarnings();
-    const worksheetData = data.map(d => ({
-      'Doctor': d.doctor,
-      'Total Records': d.totalRecords,
-      'Total Earnings': d.totalAmount,
-      ...Object.keys(d.modalityBreakdown).reduce((acc, mod) => {
-        acc[`${mod} Count`] = d.modalityBreakdown[mod].count;
-        acc[`${mod} Amount`] = d.modalityBreakdown[mod].amount;
-        return acc;
-      }, {} as any)
-    }));
+    const filtered = records.filter(r => {
+      if (r.isDeleted) return false;
+      if (username !== 'ADMIN' && r.modality !== userModality) return false;
+      const recordDate = new Date(r.rawDate || r.date);
+      const start = new Date(earningsStartDate);
+      const end = new Date(earningsEndDate);
+      end.setHours(23, 59, 59, 999);
+      return recordDate >= start && recordDate <= end;
+    });
+
+    const worksheetData = filtered.map(r => {
+      const amount = parseFloat((r.amount || r.pfAmount || '0').replace(/[^\d.]/g, '')) || 0;
+      return {
+        'RADIOLOGIST': (r.reader || 'Unknown').toUpperCase(),
+        'NAME OF PATIENT': formatExportName(r),
+        'REFERENCE NO.': r.refNo,
+        'PAID TO CASHIER': r.isPaid ? amount : 0,
+        'REPORTED TO MAIFIPP': r.isReportedToMAIFIPP ? amount : 0,
+        'NOT YET PAID': (!r.isPaid && !r.isReportedToMAIFIPP) ? amount : 0,
+        'TOTAL EARNINGS': amount
+      };
+    });
 
     const ws = XLSX.utils.json_to_sheet(worksheetData);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Doctor Earnings");
-    XLSX.writeFile(wb, `Doctor_Earnings_${earningsStartDate}_to_${earningsEndDate}.xlsx`);
-    showToast('Earnings exported to Excel');
+    XLSX.utils.book_append_sheet(wb, ws, "Doctor Fees Records");
+    XLSX.writeFile(wb, `Doctor_Fees_Records_${earningsStartDate}_to_${earningsEndDate}.xlsx`);
+    showToast('Detailed records exported to Excel');
   };
 
   const exportEarningsToPDF = () => {
-    const data = getDoctorEarnings();
-    const doc = new jsPDF();
-    
-    doc.setFontSize(18);
-    doc.text('Doctor Earnings Report', 14, 22);
-    doc.setFontSize(11);
-    doc.text(`Period: ${earningsStartDate} to ${earningsEndDate}`, 14, 30);
-
-    const tableData = data.map(d => [
-      d.doctor,
-      d.totalRecords.toString(),
-      `P ${d.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
-    ]);
-
-    autoTable(doc, {
-      startY: 35,
-      head: [['Doctor', 'Total Records', 'Total Earnings']],
-      body: tableData,
-      theme: 'striped',
-      headStyles: { fillColor: '#095161' }
+    const filtered = records.filter(r => {
+      if (r.isDeleted) return false;
+      if (username !== 'ADMIN' && r.modality !== userModality) return false;
+      const recordDate = new Date(r.rawDate || r.date);
+      const start = new Date(earningsStartDate);
+      const end = new Date(earningsEndDate);
+      end.setHours(23, 59, 59, 999);
+      return recordDate >= start && recordDate <= end;
     });
 
-    doc.save(`Doctor_Earnings_${earningsStartDate}_to_${earningsEndDate}.pdf`);
-    showToast('Earnings exported to PDF');
+    const doc = new jsPDF('l', 'mm', 'a4'); // Use landscape for detailed list
+    
+    doc.setFontSize(18);
+    doc.text('Doctor Fees Detailed Records', 14, 15);
+    doc.setFontSize(10);
+    doc.text(`Period: ${earningsStartDate} to ${earningsEndDate}`, 14, 22);
+
+    const tableData = filtered.map(r => {
+      const amount = parseFloat((r.amount || r.pfAmount || '0').replace(/[^\d.]/g, '')) || 0;
+      return [
+        (r.reader || 'Unknown').toUpperCase(),
+        formatExportName(r),
+        r.refNo,
+        r.isPaid ? amount.toLocaleString(undefined, { minimumFractionDigits: 2 }) : '0.00',
+        r.isReportedToMAIFIPP ? amount.toLocaleString(undefined, { minimumFractionDigits: 2 }) : '0.00',
+        (!r.isPaid && !r.isReportedToMAIFIPP) ? amount.toLocaleString(undefined, { minimumFractionDigits: 2 }) : '0.00',
+        amount.toLocaleString(undefined, { minimumFractionDigits: 2 })
+      ];
+    });
+
+    autoTable(doc, {
+      startY: 28,
+      head: [['RADIOLOGIST', 'NAME OF PATIENT', 'REFERENCE NO.', 'PAID TO CASHIER', 'REPORTED TO MAIFIPP', 'NOT YET PAID', 'TOTAL EARNINGS']],
+      body: tableData,
+      theme: 'grid',
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [13, 162, 194] },
+      didParseCell: (data) => {
+        if (data.section === 'body' && data.column.index === 5) {
+          const val = parseFloat(data.cell.text[0].replace(/,/g, '')) || 0;
+          if (val > 0) {
+            data.cell.styles.textColor = [239, 68, 68]; // Red-500
+            data.cell.styles.fontStyle = 'bold';
+          }
+        }
+      }
+    });
+
+    doc.save(`Doctor_Fees_Records_${earningsStartDate}_to_${earningsEndDate}.pdf`);
+    showToast('Detailed records exported to PDF');
   };
 
   const onPreviewClick = (e: React.FormEvent) => {
@@ -2090,6 +2270,7 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
       cancelText: 'Cancel',
       variant: 'danger',
       onConfirm: () => {
+        const recordToDelete = records.find(r => r.id === id);
         setRecords(prev => prev.map(r => r.id === id ? { 
           ...r, 
           isDeleted: true,
@@ -2098,6 +2279,17 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
         } : r));
         showToast('Record moved to trash');
         setConfirmModal(prev => ({ ...prev, show: false }));
+
+        // Audit Log
+        const newLog = {
+          timestamp: new Date().toISOString(),
+          user: username,
+          action: 'DELETE',
+          details: `Deleted record for ${recordToDelete?.name} (${recordToDelete?.refNo})`
+        };
+        const updatedLogs = [newLog, ...systemLogs].slice(0, 100);
+        setSystemLogs(updatedLogs);
+        localStorage.setItem('claim_slip_logs', JSON.stringify(updatedLogs));
       }
     });
   };
@@ -3581,46 +3773,46 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                <div className="bg-gradient-to-br from-[#095161] to-[#0b6377] p-6 rounded-[2rem] text-white shadow-xl">
-                  <div className="flex items-center gap-3 mb-4 opacity-80">
-                    <UserIcon className="w-5 h-5" />
-                    <span className="text-xs font-bold uppercase tracking-widest">Active Doctors</span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                <div className="bg-gradient-to-br from-[#095161] to-[#0b6377] p-5 rounded-[1.5rem] text-white shadow-lg">
+                  <div className="flex items-center gap-3 mb-3 opacity-80">
+                    <UserIcon className="w-4 h-4" />
+                    <span className="text-[10px] font-bold uppercase tracking-widest">Active Doctors</span>
                   </div>
-                  <div className="text-4xl font-black mb-1">{getDoctorEarnings().length}</div>
-                  <div className="text-[10px] opacity-70 font-medium uppercase tracking-wider">With earnings in this period</div>
+                  <div className="text-2xl font-black mb-1">{getDoctorEarnings().length}</div>
+                  <div className="text-[9px] opacity-70 font-medium uppercase tracking-wider">With earnings in this period</div>
                 </div>
-                <div className="bg-white p-6 rounded-[2rem] border-2 border-gray-50 shadow-sm">
-                  <div className="flex items-center gap-3 mb-4 text-gray-400">
-                    <Layers className="w-5 h-5" />
-                    <span className="text-xs font-bold uppercase tracking-widest">Total Records</span>
+                <div className="bg-white p-5 rounded-[1.5rem] border-2 border-gray-50 shadow-sm">
+                  <div className="flex items-center gap-3 mb-3 text-gray-400">
+                    <Layers className="w-4 h-4" />
+                    <span className="text-[10px] font-bold uppercase tracking-widest">Total Records</span>
                   </div>
-                  <div className="text-4xl font-black text-gray-900 mb-1">
+                  <div className="text-2xl font-black text-gray-900 mb-1">
                     {getDoctorEarnings().reduce((acc, d) => acc + d.totalRecords, 0)}
                   </div>
-                  <div className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Total processed slips</div>
+                  <div className="text-[9px] text-gray-400 font-medium uppercase tracking-wider">Total processed slips</div>
                 </div>
-                <div className="bg-white p-6 rounded-[2rem] border-2 border-cyan-50 shadow-sm relative overflow-hidden group">
-                  <div className="absolute top-0 right-0 w-24 h-24 bg-cyan-50 rounded-bl-[4rem] -mr-8 -mt-8 transition-transform group-hover:scale-110" />
-                  <div className="flex items-center gap-3 mb-4 text-cyan-600 relative z-10">
-                    <Shield className="w-5 h-5" />
-                    <span className="text-xs font-bold uppercase tracking-widest text-cyan-400">MAIFIPP Reported</span>
+                <div className="bg-white p-5 rounded-[1.5rem] border-2 border-cyan-50 shadow-sm relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 w-20 h-20 bg-cyan-50 rounded-bl-[3rem] -mr-6 -mt-6 transition-transform group-hover:scale-110" />
+                  <div className="flex items-center gap-3 mb-3 text-cyan-600 relative z-10">
+                    <Shield className="w-4 h-4" />
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-400">MAIFIPP Reported</span>
                   </div>
-                  <div className="text-4xl font-black text-cyan-600 mb-1 relative z-10">
+                  <div className="text-2xl font-black text-cyan-600 mb-1 relative z-10">
                     ₱ {getDoctorEarnings().reduce((acc, d) => acc + d.totalMaifippAmount, 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                   </div>
-                  <div className="text-[10px] text-cyan-400 font-black uppercase tracking-wider relative z-10">Total reported earnings</div>
+                  <div className="text-[9px] text-cyan-400 font-black uppercase tracking-wider relative z-10">Total reported earnings</div>
                 </div>
-                <div className="bg-white p-6 rounded-[2rem] border-2 border-emerald-50 shadow-sm relative overflow-hidden group">
-                  <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-50 rounded-bl-[4rem] -mr-8 -mt-8 transition-transform group-hover:scale-110" />
-                  <div className="flex items-center gap-3 mb-4 text-emerald-600 relative z-10">
-                    <CreditCard className="w-5 h-5" />
-                    <span className="text-xs font-bold uppercase tracking-widest text-emerald-400">Total Earnings</span>
+                <div className="bg-white p-5 rounded-[1.5rem] border-2 border-emerald-50 shadow-sm relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-50 rounded-bl-[3rem] -mr-6 -mt-6 transition-transform group-hover:scale-110" />
+                  <div className="flex items-center gap-3 mb-3 text-emerald-600 relative z-10">
+                    <CreditCard className="w-4 h-4" />
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-400">Total Earnings</span>
                   </div>
-                  <div className="text-4xl font-black text-emerald-600 mb-1 relative z-10">
+                  <div className="text-2xl font-black text-emerald-600 mb-1 relative z-10">
                     ₱ {getDoctorEarnings().reduce((acc, d) => acc + d.totalAmount, 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                   </div>
-                  <div className="text-[10px] text-emerald-400 font-black uppercase tracking-wider relative z-10">Total reading fees</div>
+                  <div className="text-[9px] text-emerald-400 font-black uppercase tracking-wider relative z-10">Total reading fees</div>
                 </div>
               </div>
 
@@ -3631,6 +3823,7 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
                       <th className="p-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Doctor / Radiologist</th>
                       <th className="p-4 text-[10px] font-black text-gray-400 uppercase tracking-widest text-center">Records</th>
                       <th className="p-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Modality Breakdown</th>
+                      <th className="p-4 text-[10px] font-black text-gray-400 uppercase tracking-widest text-right">PAID TO CASHIER</th>
                       <th className="p-4 text-[10px] font-black text-gray-400 uppercase tracking-widest text-right">Reported to MAIFIPP</th>
                       <th className="p-4 text-[10px] font-black text-gray-400 uppercase tracking-widest text-right">Total Earnings</th>
                     </tr>
@@ -3695,6 +3888,16 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
                           </td>
                           <td className="p-4 text-right">
                             <div className="flex flex-col items-end">
+                              <span className={`text-sm font-black ${d.totalPaidToCashierAmount > 0 ? 'text-emerald-600' : 'text-gray-300 italic'}`}>
+                                ₱ {d.totalPaidToCashierAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                              </span>
+                              {d.totalPaidToCashierAmount > 0 && (
+                                <span className="text-[9px] font-black text-emerald-500 uppercase tracking-widest mt-1">Paid</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="p-4 text-right">
+                            <div className="flex flex-col items-end">
                               <span className={`text-sm font-black ${d.totalMaifippAmount > 0 ? 'text-cyan-600' : 'text-gray-300 italic'}`}>
                                 ₱ {d.totalMaifippAmount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                               </span>
@@ -3722,77 +3925,184 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
               className="space-y-6"
             >
               <div className="flex items-center justify-between border-b pb-4 mb-6">
-                <h2 className="text-2xl font-bold text-[#095161]">User Management</h2>
-                <div className="bg-[#095161]/10 px-4 py-2 rounded-xl flex items-center gap-2">
-                  <Shield className="w-4 h-4 text-[#095161]" />
-                  <span className="text-sm font-bold text-[#095161]">Admin Access Only</span>
+                <h2 className="text-2xl font-bold text-[#095161]">System Management</h2>
+                <div className="flex items-center gap-3">
+                  <div className="bg-[#095161]/10 px-4 py-2 rounded-xl flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-[#095161]" />
+                    <span className="text-sm font-bold text-[#095161]">Admin Access Only</span>
+                  </div>
                 </div>
               </div>
 
+              {/* Modality Management Section */}
+              <div className="bg-white p-8 rounded-[2rem] border border-cyan-50 shadow-sm mb-8">
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3">
+                    <Settings className="w-6 h-6 text-[#095161]" />
+                    <h3 className="text-xl font-bold text-gray-800">Registration Modalities</h3>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setModalityInput('');
+                      setShowAddModalityModal(true);
+                    }}
+                    className="px-4 py-2 bg-[#095161] text-white text-xs font-bold rounded-xl hover:bg-[#0b6377] transition-all flex items-center gap-2"
+                  >
+                    <Plus className="w-4 h-4" /> ADD MODALITY
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {modalities.map((m: string) => (
+                    <div key={m} className="group relative">
+                      <span className="inline-flex items-center gap-2 px-3 py-1.5 bg-slate-50 text-slate-600 text-xs font-bold rounded-lg border border-slate-100 hover:bg-slate-100 transition-all uppercase tracking-wider">
+                        {m}
+                        {username === 'ADMIN' && (
+                          <button
+                            onClick={() => {
+                              setConfirmModal({
+                                show: true,
+                                title: 'Remove Modality',
+                                message: `Are you sure you want to remove ${m} from the modality list? This will only affect new registrations.`,
+                                confirmText: 'Confirm',
+                                cancelText: 'Cancel',
+                                variant: 'danger',
+                                onConfirm: () => {
+                                  const updated = modalities.filter((x: string) => x !== m);
+                                  setModalities(updated);
+                                  localStorage.setItem('claim_slip_modalities', JSON.stringify(updated));
+
+                                  // Audit Log
+                                  const newLog = {
+                                    timestamp: new Date().toISOString(),
+                                    user: username,
+                                    action: 'SYSTEM_CONFIG',
+                                    details: `Removed modality: ${m}`
+                                  };
+                                  const updatedLogs = [newLog, ...systemLogs].slice(0, 100);
+                                  setSystemLogs(updatedLogs);
+                                  localStorage.setItem('claim_slip_logs', JSON.stringify(updatedLogs));
+                                  setConfirmModal(prev => ({ ...prev, show: false }));
+                                  showToast(`Modality ${m} removed`);
+                                }
+                              });
+                            }}
+                            className="text-rose-400 hover:text-rose-600 ml-1"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-400 mt-4 font-medium italic">Note: Adding or removing a modality here updates the registration choices for new users.</p>
+              </div>
+
+              <h3 className="text-xl font-bold text-gray-800 mb-4 px-1">User Management & Activity</h3>
               <div className="grid gap-4">
-                {users.map((user: any) => (
-                  <div key={user.username} className="bg-gray-50 p-6 rounded-2xl border border-gray-100 flex items-center justify-between group hover:bg-white hover:shadow-md transition-all">
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 bg-[#095161]/10 rounded-full flex items-center justify-center">
-                        <UserIcon className="w-6 h-6 text-[#095161]" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-bold text-gray-800">{user.username}</h3>
-                          {user.modality && (
-                            <span className="text-[9px] font-black text-[#095161] bg-[#095161]/5 px-2 py-0.5 rounded-md uppercase border border-[#095161]/10">
-                              {user.modality}
-                            </span>
-                          )}
-                          {user.username !== 'ADMIN' && (
-                            <div className="flex flex-col gap-1">
-                              <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-widest self-start ${user.isApproved ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'}`}>
-                                {user.isApproved ? 'Approved' : 'Pending'}
-                              </span>
-                              {username === 'ADMIN' && (
-                                <select
-                                  value={user.modality || ''}
-                                  onChange={(e) => handleModalityChange(user.username, e.target.value)}
-                                  className="text-[10px] bg-white border border-gray-200 rounded-md py-1 px-2 outline-none focus:border-[#095161] transition-all font-bold text-[#095161]"
-                                >
-                                  <option value="">Select Modality</option>
-                                  {DEFAULT_MODALITIES.map(m => (
-                                    <option key={m} value={m}>{m}</option>
-                                  ))}
-                                </select>
-                              )}
-                            </div>
+                {users.map((user: any) => {
+                  const lastActive = user.lastActive ? new Date(user.lastActive) : null;
+                  const isOnline = lastActive && (new Date().getTime() - lastActive.getTime() < 300000); // 5 mins
+                  
+                  return (
+                    <div key={user.username} className="bg-gray-50 p-6 rounded-2xl border border-gray-100 flex items-center justify-between group hover:bg-white hover:shadow-md transition-all">
+                      <div className="flex items-center gap-4">
+                        <div className="relative">
+                          <div className="w-12 h-12 bg-[#095161]/10 rounded-full flex items-center justify-center">
+                            <UserIcon className="w-6 h-6 text-[#095161]" />
+                          </div>
+                          {isOnline && (
+                            <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-white rounded-full pulse-animation" />
                           )}
                         </div>
-                        <p className="text-xs text-gray-500">{user.email || 'No email provided'}</p>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-bold text-gray-800">{user.username}</h3>
+                            {isOnline ? (
+                              <span className="text-[8px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md uppercase tracking-widest border border-emerald-100 animate-pulse">Online</span>
+                            ) : (
+                              <span className="text-[8px] font-bold text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-md uppercase tracking-widest border border-gray-200">Offline</span>
+                            )}
+                            {user.modality && (
+                              <span className="text-[9px] font-black text-[#095161] bg-[#095161]/5 px-2 py-0.5 rounded-md uppercase border border-[#095161]/10">
+                                {user.modality}
+                              </span>
+                            )}
+                            {user.username !== 'ADMIN' && (
+                              <div className="flex items-center gap-1">
+                                <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-widest ${user.isApproved ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'}`}>
+                                  {user.isApproved ? 'Approved' : 'Pending'}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-3 mt-1">
+                            <p className="text-[10px] text-gray-500 font-medium">{user.email || 'No email'}</p>
+                            {lastActive && (
+                              <div className="flex items-center gap-1 text-[9px] text-gray-400 border-l pl-3 ml-1">
+                                <Clock className="w-2.5 h-2.5" />
+                                <span>Active: {lastActive.toLocaleString()}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center gap-3">
+                        {user.username !== 'ADMIN' && (
+                          <button
+                            onClick={() => {
+                              setSelectedUserForHistory(user);
+                              const today = new Date().toISOString().split('T')[0];
+                              setHistoryStartDate(today);
+                              setHistoryEndDate(today);
+                              setShowHistoryModal(true);
+                            }}
+                            className="p-2 text-slate-400 hover:text-[#095161] hover:bg-slate-100 rounded-lg transition-all flex items-center gap-2 text-[10px] font-bold"
+                            title="View History"
+                          >
+                            <Clock className="w-4 h-4" /> HISTORY
+                          </button>
+                        )}
+
+                        {user.username !== 'ADMIN' && !user.isApproved && (
+                          <button
+                            onClick={() => approveUser(user.username)}
+                            className="px-4 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-sm flex items-center gap-2"
+                          >
+                            <Check className="w-4 h-4" />
+                            APPROVE
+                          </button>
+                        )}
+                        
+                        {user.username !== 'ADMIN' ? (
+                          <button
+                            onClick={() => {
+                              setConfirmModal({
+                                show: true,
+                                title: 'Remove User',
+                                message: `Are you sure you want to remove user "${user.username}"? This will delete their account permanently.`,
+                                confirmText: 'Confirm',
+                                cancelText: 'Cancel',
+                                variant: 'danger',
+                                onConfirm: () => {
+                                  deleteUser(user.username);
+                                  setConfirmModal(prev => ({ ...prev, show: false }));
+                                }
+                              });
+                            }}
+                            className="p-3 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+                            title="Remove User"
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </button>
+                        ) : (
+                          <span className="text-[10px] font-bold text-[#095161] bg-[#095161]/10 px-4 py-2 rounded-xl border border-[#095161]/20 uppercase tracking-[0.2em]">Master Console</span>
+                        )}
                       </div>
                     </div>
-                    
-                    <div className="flex items-center gap-2">
-                      {user.username !== 'ADMIN' && !user.isApproved && (
-                        <button
-                          onClick={() => approveUser(user.username)}
-                          className="px-4 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-sm flex items-center gap-2"
-                        >
-                          <Check className="w-4 h-4" />
-                          APPROVE
-                        </button>
-                      )}
-                      
-                      {user.username !== 'ADMIN' ? (
-                        <button
-                          onClick={() => deleteUser(user.username)}
-                          className="p-3 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all opacity-0 group-hover:opacity-100"
-                          title="Remove User"
-                        >
-                          <Trash2 className="w-5 h-5" />
-                        </button>
-                      ) : (
-                        <span className="text-[10px] font-bold text-[#095161] bg-[#095161]/10 px-2 py-1 rounded-full uppercase tracking-widest">Master</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
                 
                 {users.length === 0 && (
                   <div className="text-center py-12 text-gray-400">
@@ -5660,56 +5970,64 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
         {showMaifippModal && selectedDoctorForMaifipp && (
           <div className="fixed inset-0 z-[21000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
             <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              initial={{ opacity: 0, scale: 0.95, y: 30 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col"
+              exit={{ opacity: 0, scale: 0.95, y: 30 }}
+              className="bg-white rounded-[3rem] shadow-2xl w-full max-w-5xl max-h-[92vh] overflow-hidden flex flex-col border border-white/20"
             >
-              <div className="flex items-center justify-between p-8 bg-[#0da2c2] text-white">
-                <div className="flex flex-col">
-                  <h2 className="text-3xl font-black">{selectedDoctorForMaifipp}</h2>
-                  <p className="text-xs font-bold uppercase tracking-[0.3em] opacity-80 mt-1">Manage MAIFIPP Reported Patients</p>
+              {/* Header */}
+              <div className="flex items-center justify-between p-10 bg-gradient-to-br from-[#0da2c2] to-[#095161] text-white overflow-hidden relative">
+                <div className="absolute top-0 right-0 w-96 h-96 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl pointer-events-none" />
+                <div className="flex flex-col relative z-10">
+                  <h2 className="text-4xl font-black tracking-tight">{selectedDoctorForMaifipp}</h2>
+                  <div className="flex items-center gap-2 mt-2">
+                    <div className="w-1.5 h-1.5 rounded-full bg-cyan-300 animate-pulse" />
+                    <p className="text-[10px] font-black uppercase tracking-[0.4em] text-cyan-200">MAIFIPP Manager System</p>
+                  </div>
                 </div>
-                <div className="flex items-center gap-6">
+                
+                <div className="flex items-center gap-8 relative z-10">
                   {isAdminMode ? (
-                    <div className="flex bg-white/10 p-1 rounded-2xl">
+                    <div className="flex bg-[#073d4a]/50 p-1.5 rounded-[1.5rem] backdrop-blur-md border border-white/10">
                       <button 
                         onClick={() => {
                           setMaifippModalTab('pending');
                           setMaifippSelectedIds(new Set());
                         }}
-                        className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${maifippModalTab === 'pending' ? 'bg-white text-cyan-600 shadow-lg' : 'text-white hover:bg-white/10'}`}
+                        className={`px-8 py-3 rounded-[1.1rem] text-[11px] font-black uppercase tracking-widest transition-all duration-300 ${maifippModalTab === 'pending' ? 'bg-white text-[#095161] shadow-xl scale-105' : 'text-cyan-100 hover:text-white hover:bg-white/5'}`}
                       >
-                        Pending
+                        Pending List
                       </button>
                       <button 
                         onClick={() => {
                           setMaifippModalTab('reported');
                           setMaifippSelectedIds(new Set());
                         }}
-                        className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${maifippModalTab === 'reported' ? 'bg-white text-cyan-600 shadow-lg' : 'text-white hover:bg-white/10'}`}
+                        className={`px-8 py-3 rounded-[1.1rem] text-[11px] font-black uppercase tracking-widest transition-all duration-300 ${maifippModalTab === 'reported' ? 'bg-white text-[#095161] shadow-xl scale-105' : 'text-cyan-100 hover:text-white hover:bg-white/5'}`}
                       >
                         Reported History
                       </button>
                     </div>
                   ) : (
-                    <div className="bg-white/10 px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-white">
+                    <div className="bg-white/10 px-8 py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest text-white border border-white/10 backdrop-blur-sm">
                       Reported History
                     </div>
                   )}
                   <button 
                     onClick={() => setShowMaifippModal(false)} 
-                    className="w-12 h-12 bg-white/20 hover:bg-white/30 rounded-full flex items-center justify-center transition-all"
+                    className="w-14 h-14 bg-white/10 hover:bg-white/20 rounded-2xl flex items-center justify-center transition-all border border-white/20 hover:rotate-90"
                   >
-                    <X className="w-6 h-6" />
+                    <X className="w-7 h-7" />
                   </button>
                 </div>
               </div>
 
-              <div className="p-8 flex flex-col gap-6 overflow-hidden">
-                <div className="flex flex-col xl:flex-row xl:items-stretch gap-4">
-                  <div className="relative xl:w-64">
-                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              {/* Toolbar */}
+              <div className="px-10 py-6 flex flex-col gap-5 overflow-hidden bg-white border-b border-gray-100/50">
+                <div className="flex flex-col xl:flex-row xl:items-center gap-6">
+                  {/* Search */}
+                  <div className="relative flex-grow max-w-sm group">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-300 group-focus-within:text-cyan-500 transition-colors" />
                     <input 
                       type="text"
                       placeholder="Search patients..."
@@ -5718,111 +6036,74 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
                         if (maifippModalTab === 'pending') setMaifippSearch(e.target.value);
                         else setMaifippHistoryFilter(e.target.value);
                       }}
-                      className="w-full pl-11 pr-4 py-4 bg-gray-50 border-2 border-transparent rounded-2xl focus:border-cyan-500 focus:bg-white outline-none transition-all font-bold text-sm text-gray-700"
+                      className="w-full pl-11 pr-4 py-3 bg-gray-50 border-2 border-gray-100/50 rounded-2xl focus:border-cyan-500 focus:bg-white outline-none transition-all font-bold text-xs text-gray-700 shadow-sm"
                     />
                   </div>
 
-                  <div className="bg-gray-50 p-3 rounded-2xl border border-gray-100 flex flex-col items-center justify-center min-w-[120px]">
-                    <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1 leading-none">Total Amount</span>
-                    <span className="text-sm font-black text-[#095161]">
-                      ₱ {records
-                        .filter(r => 
-                          r.reader === selectedDoctorForMaifipp && 
-                          !r.isDeleted &&
-                          (maifippModalTab === 'pending' ? !r.isReportedToMAIFIPP : r.isReportedToMAIFIPP) &&
-                          (maifippModalTab === 'pending' 
-                            ? (r.name.toLowerCase().includes(maifippSearch.toLowerCase()) || r.refNo.toLowerCase().includes(maifippSearch.toLowerCase()))
-                            : (r.name.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) || 
-                               r.refNo.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) ||
-                               (r.maifippServiceMonth && r.maifippServiceMonth.toLowerCase().includes(maifippHistoryFilter.toLowerCase())))
+                  {/* Stats & Selection Info */}
+                  <div className="flex items-center gap-3">
+                    {/* Total Amount Badge */}
+                    <div className="bg-[#f0f9fb] px-4 py-2 rounded-2xl border border-cyan-100 flex flex-col items-start shadow-sm">
+                      <span className="text-[8px] font-black text-cyan-600/60 uppercase tracking-widest leading-none mb-1">Total Amount</span>
+                      <span className="text-sm font-black text-[#095161]">
+                        ₱ {records
+                          .filter(r => 
+                            r.reader === selectedDoctorForMaifipp && 
+                            !r.isDeleted &&
+                            (maifippModalTab === 'pending' ? !r.isReportedToMAIFIPP : r.isReportedToMAIFIPP) &&
+                            (maifippModalTab === 'pending' 
+                              ? (r.name.toLowerCase().includes(maifippSearch.toLowerCase()) || r.refNo.toLowerCase().includes(maifippSearch.toLowerCase()))
+                              : (r.name.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) || 
+                                 r.refNo.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) ||
+                                 (r.maifippServiceMonth && r.maifippServiceMonth.toLowerCase().includes(maifippHistoryFilter.toLowerCase())))
+                            )
                           )
-                        )
-                        .reduce((acc, r) => {
-                          const val = (r.amount || r.pfAmount || '0').replace(/[^\d.]/g, '');
-                          return acc + (parseFloat(val) || 0);
-                        }, 0)
-                        .toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </span>
+                          .reduce((acc, r) => {
+                            const val = (r.amount || r.pfAmount || '0').replace(/[^\d.]/g, '');
+                            return acc + (parseFloat(val) || 0);
+                          }, 0)
+                          .toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    {/* Selection Counter */}
+                    {maifippSelectedIds.size > 0 && (
+                      <div className="bg-amber-500 text-white px-3 py-2 rounded-2xl flex flex-col items-center shadow-lg shadow-amber-200 animate-in fade-in zoom-in duration-300">
+                        <span className="text-[8px] font-black uppercase tracking-widest leading-none mb-1">Selected</span>
+                        <span className="text-sm font-black leading-none">{maifippSelectedIds.size}</span>
+                      </div>
+                    )}
                   </div>
 
-                  {maifippModalTab === 'pending' ? (
-                    <div 
-                      className={`p-3 rounded-2xl border transition-all flex flex-col justify-center min-w-[320px] shrink-0 ${
-                        maifippSelectedIds.size > 0 
-                          ? 'bg-amber-50 border-amber-200 shadow-inner' 
-                          : 'bg-gray-50 border-gray-100 opacity-50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[8px] font-black text-amber-700 uppercase tracking-widest leading-none">Select Month Reported</span>
-                        {maifippSelectedIds.size > 0 && (
-                          <span className="text-[8px] font-black bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded-md leading-none">
-                            {maifippSelectedIds.size} SELECTED
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-grow">
+                    {/* Month Selection Area */}
+                    <div className={`p-1.5 px-4 rounded-2xl border transition-all flex items-center gap-4 min-w-[260px] ${
+                      maifippModalTab === 'pending' && maifippSelectedIds.size > 0 
+                        ? 'bg-amber-50 border-amber-200' 
+                        : maifippModalTab === 'reported' ? 'bg-[#f4fbf8] border-emerald-100' : 'bg-gray-50 border-gray-100 opacity-60'
+                    }`}>
+                      <div className="flex flex-col">
+                        <span className={`text-[8px] font-black uppercase tracking-widest mb-0.5 ${maifippModalTab === 'reported' ? 'text-emerald-700' : 'text-amber-700'}`}>
+                          {maifippModalTab === 'pending' ? 'Report Month' : 'Filter Month'}
+                        </span>
+                        <div className="flex items-center gap-3">
                           <select 
-                            value={maifippBulkMonth.split('-')[1]}
-                            disabled={maifippSelectedIds.size === 0}
+                            value={maifippModalTab === 'pending' ? maifippBulkMonth.split('-')[1] : (maifippHistoryFilter.match(/^\d{4}-\d{2}/) ? maifippHistoryFilter.split('-')[1] : '')}
+                            disabled={maifippModalTab === 'pending' && maifippSelectedIds.size === 0}
                             onChange={(e) => {
-                              const [y] = maifippBulkMonth.split('-');
-                              setMaifippBulkMonth(`${y}-${e.target.value}`);
-                            }}
-                            className="bg-transparent border-none p-0 text-base font-black text-amber-950 outline-none cursor-pointer focus:ring-0 w-full tracking-tight appearance-none"
-                          >
-                            {[
-                              { v: '01', l: 'January' }, { v: '02', l: 'February' }, { v: '03', l: 'March' },
-                              { v: '04', l: 'April' }, { v: '05', l: 'May' }, { v: '06', l: 'June' },
-                              { v: '07', l: 'July' }, { v: '08', l: 'August' }, { v: '09', l: 'September' },
-                              { v: '10', l: 'October' }, { v: '11', l: 'November' }, { v: '12', l: 'December' }
-                            ].map(m => (
-                              <option key={m.v} value={m.v}>{m.l}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="w-24 relative">
-                          <input 
-                            list="maifipp-bulk-years"
-                            type="text"
-                            value={maifippBulkMonth.split('-')[0]}
-                            disabled={maifippSelectedIds.size === 0}
-                            onChange={(e) => {
-                              const [, m] = maifippBulkMonth.split('-');
-                              const val = e.target.value.replace(/\D/g, '').slice(0, 4);
-                              setMaifippBulkMonth(`${val}-${m}`);
-                            }}
-                            placeholder="Year"
-                            className="bg-white/50 border border-amber-200 rounded-lg px-2 py-1 text-sm font-black text-amber-900 outline-none focus:border-amber-400 w-full text-center"
-                          />
-                          <datalist id="maifipp-bulk-years">
-                            {Array.from({ length: 11 }, (_, i) => (new Date().getFullYear() - 5 + i).toString()).map(y => (
-                              <option key={y} value={y} />
-                            ))}
-                          </datalist>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="p-3 rounded-2xl border border-emerald-100 bg-emerald-50 flex flex-col justify-center min-w-[320px] shrink-0">
-                      <span className="text-[8px] font-black text-emerald-700 uppercase tracking-widest leading-none mb-1">Filter by Service Month</span>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-grow">
-                          <select 
-                            value={maifippHistoryFilter.match(/^\d{4}-\d{2}/) ? maifippHistoryFilter.split('-')[1] : ''}
-                            onChange={(e) => {
-                              const [y] = (maifippHistoryFilter.match(/^\d{4}-\d{2}/) ? maifippHistoryFilter.split('-') : [new Date().getFullYear().toString()]);
-                              if (!e.target.value) {
-                                if (!y) setMaifippHistoryFilter('');
-                                else setMaifippHistoryFilter(y);
+                              if (maifippModalTab === 'pending') {
+                                const [y] = maifippBulkMonth.split('-');
+                                setMaifippBulkMonth(`${y}-${e.target.value}`);
                               } else {
-                                setMaifippHistoryFilter(`${y}-${e.target.value}`);
+                                const [y] = (maifippHistoryFilter.match(/^\d{4}-\d{2}/) ? maifippHistoryFilter.split('-') : [new Date().getFullYear().toString()]);
+                                if (!e.target.value) setMaifippHistoryFilter(y);
+                                else setMaifippHistoryFilter(`${y}-${e.target.value}`);
                               }
                             }}
-                            className="bg-transparent border-none p-0 text-base font-black text-emerald-950 outline-none cursor-pointer focus:ring-0 w-full tracking-tight appearance-none"
+                            className={`bg-transparent border-none p-0 text-xs font-black outline-none cursor-pointer focus:ring-0 appearance-none min-w-[80px] ${
+                              maifippModalTab === 'reported' ? 'text-emerald-900' : 'text-amber-900'
+                            }`}
                           >
-                            <option value="">Month...</option>
+                            {maifippModalTab === 'reported' && <option value="">Full History</option>}
                             {[
                               { v: '01', l: 'January' }, { v: '02', l: 'February' }, { v: '03', l: 'March' },
                               { v: '04', l: 'April' }, { v: '05', l: 'May' }, { v: '06', l: 'June' },
@@ -5832,44 +6113,39 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
                               <option key={m.v} value={m.v}>{m.l}</option>
                             ))}
                           </select>
-                        </div>
-                        <div className="w-24 relative">
+                          
                           <input 
-                            list="maifipp-filter-years"
+                            list={maifippModalTab === 'pending' ? "maifipp-bulk-years" : "maifipp-filter-years"}
                             type="text"
-                            value={maifippHistoryFilter.match(/^\d{4}/) ? maifippHistoryFilter.split('-')[0] : (maifippHistoryFilter.match(/^\d+$/) ? maifippHistoryFilter : '')}
+                            value={maifippModalTab === 'pending' ? maifippBulkMonth.split('-')[0] : (maifippHistoryFilter.match(/^\d{4}/) ? maifippHistoryFilter.split('-')[0] : (maifippHistoryFilter.match(/^\d+$/) ? maifippHistoryFilter : ''))}
+                            disabled={maifippModalTab === 'pending' && maifippSelectedIds.size === 0}
                             onChange={(e) => {
                               const val = e.target.value.replace(/\D/g, '').slice(0, 4);
-                              const parts = maifippHistoryFilter.split('-');
-                              const m = parts.length > 1 ? parts[1] : '';
-                              if (!val && !m) setMaifippHistoryFilter('');
-                              else if (!m) setMaifippHistoryFilter(val);
-                              else setMaifippHistoryFilter(`${val}-${m}`);
+                              if (maifippModalTab === 'pending') {
+                                const [, m] = maifippBulkMonth.split('-');
+                                setMaifippBulkMonth(`${val}-${m}`);
+                              } else {
+                                const parts = maifippHistoryFilter.split('-');
+                                const m = parts.length > 1 ? parts[1] : '';
+                                if (!val && !m) setMaifippHistoryFilter('');
+                                else if (!m) setMaifippHistoryFilter(val);
+                                else setMaifippHistoryFilter(`${val}-${m}`);
+                              }
                             }}
                             placeholder="Year"
-                            className="bg-white/50 border border-emerald-200 rounded-lg px-2 py-1 text-sm font-black text-emerald-900 outline-none focus:border-emerald-400 w-full text-center"
+                            className={`bg-white/40 border-none rounded-lg px-2 py-0.5 text-[10px] font-black outline-none w-14 text-center ${
+                              maifippModalTab === 'reported' ? 'text-emerald-900' : 'text-amber-900 font-bold'
+                            }`}
                           />
-                          <datalist id="maifipp-filter-years">
-                            {Array.from({ length: 11 }, (_, i) => (new Date().getFullYear() - i).toString()).map(y => (
-                              <option key={y} value={y} />
-                            ))}
-                          </datalist>
                         </div>
-                        {maifippHistoryFilter && (
-                          <button 
-                            onClick={() => setMaifippHistoryFilter('')}
-                            className="text-emerald-500 hover:text-emerald-700"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        )}
                       </div>
                     </div>
-                  )}
+                  </div>
 
-                  <div className="flex gap-2 flex-grow">
+                  {/* Actions Area */}
+                  <div className="flex items-center gap-2 ml-auto">
                     {isAdminMode && (
-                      <>
+                      <div className="flex bg-gray-100/50 p-1 rounded-xl border border-gray-200/50 shrink-0">
                         <button 
                           onClick={() => {
                             const searchLower = (maifippModalTab === 'pending' ? maifippSearch : maifippHistoryFilter).toLowerCase();
@@ -5880,21 +6156,22 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
                               (r.name.toLowerCase().includes(searchLower) || 
                                r.refNo.toLowerCase().includes(searchLower) ||
                                (maifippModalTab === 'reported' && r.maifippServiceMonth && r.maifippServiceMonth.toLowerCase().includes(searchLower))) &&
-                              (maifippModalTab === 'reported' && maifippHistoryFilter && maifippHistoryFilter.match(/^\d{4}-\d{2}/) ? r.maifippServiceMonth === maifippHistoryFilter : true)
+                              (maifippModalTab === 'reported' && maifippHistoryFilter && maifippHistoryFilter.match(/^\d{4}-\d{2}/) ? r.maifippServiceMonth === maifippHistoryFilter : true) &&
+                              !r.isPaid
                             );
                             setMaifippSelectedIds(new Set(docRecords.map(r => r.id)));
                           }}
-                          className="flex-1 bg-cyan-50 text-cyan-600 font-black text-[10px] uppercase tracking-widest rounded-2xl hover:bg-cyan-100 transition-all border border-cyan-100 py-3 px-4"
+                          className="px-3 py-2 text-cyan-700 font-bold text-[9px] uppercase tracking-widest hover:bg-white hover:shadow-sm rounded-lg transition-all"
                         >
                           Select All
                         </button>
                         <button 
                           onClick={() => setMaifippSelectedIds(new Set())}
-                          className="flex-1 bg-gray-50 text-gray-400 font-black text-[10px] uppercase tracking-widest rounded-2xl hover:bg-gray-100 transition-all border border-gray-100 py-3 px-4"
+                          className="px-3 py-2 text-gray-400 font-bold text-[9px] uppercase tracking-widest hover:bg-white hover:shadow-sm rounded-lg transition-all"
                         >
                           Clear
                         </button>
-                      </>
+                      </div>
                     )}
                     {isAdminMode && (
                       <button 
@@ -5923,129 +6200,380 @@ export default function ClaimSlipGenerator({ onLogout, username, userModality }:
                           
                           showToast(`${count} records updated successfully`, 'success');
                         }}
-                        className="flex-[1.5] bg-emerald-600 text-white font-black text-[10px] uppercase tracking-widest rounded-2xl hover:bg-emerald-700 active:scale-95 transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 disabled:opacity-50 disabled:grayscale py-3 px-4"
+                        className={`px-6 py-2.5 font-black text-[9px] uppercase tracking-[0.1em] rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95 disabled:opacity-50 disabled:grayscale shrink-0 ${
+                          maifippModalTab === 'pending' 
+                            ? 'bg-emerald-600 text-white shadow-emerald-200 hover:bg-emerald-700' 
+                            : 'bg-[#fb7185] text-white shadow-rose-200 hover:bg-rose-600'
+                        }`}
                       >
-                        <CheckCircle2 className="w-4 h-4" />
-                        {maifippModalTab === 'pending' ? 'Reported' : 'Undo Report'}
+                        {maifippModalTab === 'pending' ? <CheckCircle2 className="w-4 h-4" /> : <RotateCcw className="w-4 h-4" />}
+                        {maifippModalTab === 'pending' ? 'Report' : 'Undo'}
                       </button>
                     )}
                   </div>
                 </div>
 
-                <div className="flex-grow overflow-y-auto pr-2 custom-scrollbar">
-                  <div className="flex flex-col gap-3 pb-4">
-                    {records
-                      .filter(r => 
-                        r.reader === selectedDoctorForMaifipp && 
-                        !r.isDeleted &&
-                        (maifippModalTab === 'pending' ? !r.isReportedToMAIFIPP : r.isReportedToMAIFIPP) &&
-                        (maifippModalTab === 'pending' 
-                          ? (r.name.toLowerCase().includes(maifippSearch.toLowerCase()) || r.refNo.toLowerCase().includes(maifippSearch.toLowerCase()))
-                          : (r.name.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) || 
-                             r.refNo.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) ||
-                             (r.maifippServiceMonth && r.maifippServiceMonth.toLowerCase().includes(maifippHistoryFilter.toLowerCase())))
+                {/* List Container */}
+                <div className="flex-grow overflow-y-auto pr-6 -mr-6 custom-scrollbar min-h-[400px]">
+                  <div className="flex flex-col gap-4 pb-10">
+                    <AnimatePresence mode="popLayout">
+                      {records
+                        .filter(r => 
+                          r.reader === selectedDoctorForMaifipp && 
+                          !r.isDeleted &&
+                          (maifippModalTab === 'pending' ? !r.isReportedToMAIFIPP : r.isReportedToMAIFIPP) &&
+                          (maifippModalTab === 'pending' 
+                            ? (r.name.toLowerCase().includes(maifippSearch.toLowerCase()) || r.refNo.toLowerCase().includes(maifippSearch.toLowerCase()))
+                            : (r.name.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) || 
+                               r.refNo.toLowerCase().includes(maifippHistoryFilter.toLowerCase()) ||
+                               (r.maifippServiceMonth && r.maifippServiceMonth.toLowerCase().includes(maifippHistoryFilter.toLowerCase())))
+                          )
                         )
-                      )
-                      .sort((a, b) => new Date(b.rawDate || b.date).getTime() - new Date(a.rawDate || a.date).getTime())
-                      .map((record) => {
-                        const isReported = record.isReportedToMAIFIPP;
-                        const isSelected = maifippSelectedIds.has(record.id);
+                        .sort((a, b) => new Date(b.rawDate || b.date).getTime() - new Date(a.rawDate || a.date).getTime())
+                        .map((record) => {
+                          const isReported = record.isReportedToMAIFIPP;
+                          const isSelected = maifippSelectedIds.has(record.id);
+                          const isPaid = record.isPaid;
 
-                        return (
-                          <motion.div 
-                            layout
-                            key={record.id}
-                            onClick={() => {
-                              if (maifippModalTab === 'pending' || (maifippModalTab === 'reported' && isAdminMode)) {
-                                const newSelected = new Set(maifippSelectedIds);
-                                if (newSelected.has(record.id)) {
-                                  newSelected.delete(record.id);
-                                } else {
-                                  newSelected.add(record.id);
+                          return (
+                            <motion.div 
+                              layout
+                              initial={{ opacity: 0, x: -20 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              exit={{ opacity: 0, scale: 0.95 }}
+                              key={record.id}
+                              onClick={() => {
+                                if (isPaid) return;
+                                if (maifippModalTab === 'pending' || (maifippModalTab === 'reported' && isAdminMode)) {
+                                  const newSelected = new Set(maifippSelectedIds);
+                                  if (newSelected.has(record.id)) {
+                                    newSelected.delete(record.id);
+                                  } else {
+                                    newSelected.add(record.id);
+                                  }
+                                  setMaifippSelectedIds(newSelected);
                                 }
-                                setMaifippSelectedIds(newSelected);
-                              }
-                            }}
-                            className={`p-4 rounded-2xl border-2 transition-all flex items-center justify-between cursor-pointer group ${
-                              isSelected ? 'border-cyan-600 bg-cyan-50/50 shadow-md scale-[1.01]' :
-                              isReported 
-                                ? 'border-emerald-100 bg-emerald-50/30' 
-                                : 'border-gray-100 bg-white hover:border-cyan-200 shadow-sm'
-                            } ${(!isAdminMode && maifippModalTab === 'reported') ? 'cursor-default pointer-events-none' : ''}`}
-                          >
-                            <div className="flex items-center gap-5 flex-grow min-w-0">
-                              <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all flex-shrink-0 ${
-                                isSelected ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-100' :
+                              }}
+                              className={`p-6 rounded-[2rem] border-2 transition-all duration-300 flex items-center justify-between cursor-pointer relative overflow-hidden group shadow-sm ${
+                                isSelected ? 'border-cyan-500 bg-cyan-50/50 scale-[1.01] shadow-xl shadow-cyan-100/50' :
+                                isPaid ? 'border-gray-100 bg-gray-50/50 opacity-60 grayscale cursor-not-allowed shadow-none' :
                                 isReported 
-                                  ? 'bg-emerald-500 text-white' 
-                                  : 'bg-gray-100 text-gray-400 group-hover:bg-cyan-100 group-hover:text-cyan-500 shadow-inner'
-                              }`}>
-                                {isSelected ? <CheckSquare className="w-5 h-5" /> : isReported ? <CheckCircle2 className="w-5 h-5" /> : <Square className="w-4 h-4" />}
-                              </div>
-                              <div className="flex flex-col min-w-0 flex-grow">
-                                <div className="flex items-center gap-3">
-                                  <span className={`font-bold tracking-tight truncate text-sm sm:text-base ${isSelected ? 'text-cyan-950' : isReported ? 'text-emerald-950' : 'text-gray-800'}`}>
-                                    {record.name}
-                                  </span>
-                                  <span className={`hidden sm:inline-block text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-lg whitespace-nowrap ${
-                                    isSelected ? 'bg-cyan-100 text-cyan-600' : 'bg-gray-50 text-gray-400'
-                                  }`}>{record.modality}</span>
+                                  ? 'border-emerald-100 bg-[#f4fbf8] hover:border-emerald-300' 
+                                  : 'border-gray-100 bg-white hover:border-cyan-300 hover:shadow-lg'
+                              } ${(!isAdminMode && maifippModalTab === 'reported') ? 'cursor-default pointer-events-none' : ''}`}
+                            >
+                              <div className="flex items-center gap-6 flex-grow min-w-0 z-10">
+                                {/* Checkbox/Status Icon */}
+                                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all flex-shrink-0 duration-500 ${
+                                  isSelected ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-200 rotate-12' :
+                                  isPaid ? 'bg-gray-200 text-gray-400' :
+                                  isReported 
+                                    ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-100' 
+                                    : 'bg-gray-100 text-gray-300 group-hover:bg-cyan-100 group-hover:text-cyan-500 shadow-inner'
+                                }`}>
+                                  {isSelected ? <CheckSquare className="w-7 h-7" /> : isPaid ? <CreditCard className="w-7 h-7" /> : isReported ? <CheckCircle2 className="w-7 h-7" /> : <Square className="w-5 h-5" />}
                                 </div>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-[10px] font-bold text-gray-400 whitespace-nowrap">{record.date}</span>
-                                  <span className="text-gray-200">|</span>
-                                  <span className="text-[10px] font-medium text-gray-300 tracking-tighter truncate">{record.refNo}</span>
-                                </div>
-                              </div>
-                            </div>
 
-                            <div className="flex items-center gap-6 sm:gap-10 shrink-0 ml-4">
-                              <div className="flex flex-col items-end min-w-[80px]">
-                                <span className={`font-black tracking-tight text-sm sm:text-base ${isSelected ? 'text-cyan-700' : isReported ? 'text-emerald-600' : 'text-[#0da2c2]'}`}>
-                                  ₱ {((r) => {
-                                    const val = (r.amount || r.pfAmount || '0').replace(/[^\d.]/g, '');
-                                    return (parseFloat(val) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 });
-                                  })(record)}
-                                </span>
-                              </div>
-
-                              {isReported && (
-                                <div className="flex items-center gap-2 pointer-events-auto bg-white/60 p-2 rounded-xl border border-gray-100" onClick={(e) => e.stopPropagation()}>
-                                  <div className="hidden sm:flex flex-col items-start px-2">
-                                    <span className="text-[7px] font-black text-gray-400 uppercase tracking-[0.2em]">Service Month</span>
-                                    {isAdminMode ? (
-                                      <input 
-                                        type="month"
-                                        value={record.maifippServiceMonth || ''}
-                                        onChange={(e) => {
-                                          setRecords(prev => prev.map(r => r.id === record.id ? { 
-                                            ...r, 
-                                            maifippServiceMonth: e.target.value 
-                                          } : r));
-                                        }}
-                                        className="bg-transparent border-none p-0 text-[11px] font-black text-[#095161] outline-none hover:text-cyan-600 transition-colors w-24"
-                                      />
-                                    ) : (
-                                      <span className="text-[11px] font-black text-[#095161]">{record.maifippServiceMonth || 'N/A'}</span>
-                                    )}
+                                <div className="flex flex-col min-w-0 flex-grow py-1">
+                                  <div className="flex items-center gap-4 flex-wrap">
+                                    <span className={`text-xl font-black tracking-tight truncate leading-tight ${isSelected ? 'text-[#095161]' : isReported ? 'text-emerald-950' : 'text-gray-800'}`}>
+                                      {record.name}
+                                    </span>
+                                    <div className="flex items-center gap-2">
+                                      <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${
+                                        isSelected ? 'bg-cyan-100 text-cyan-600' : 'bg-gray-100 text-gray-400'
+                                      }`}>{record.modality}</span>
+                                      {isPaid && (
+                                        <span className="bg-emerald-100 text-emerald-600 text-[9px] font-black px-3 py-1 rounded-full uppercase tracking-widest flex items-center gap-1.5 border border-emerald-200/50">
+                                          <div className="w-1 h-1 rounded-full bg-emerald-600" />
+                                          PAID
+                                        </span>
+                                      )}
+                                    </div>
                                   </div>
-                                  <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+                                  
+                                  <div className="flex items-center gap-4 mt-2">
+                                    <div className="flex items-center gap-2 text-gray-400">
+                                      <Calendar className="w-3.5 h-3.5" />
+                                      <span className="text-xs font-bold">{record.date}</span>
+                                    </div>
+                                    <div className="w-1 h-1 rounded-full bg-gray-200" />
+                                    <span className="text-xs font-bold text-gray-300">HOSP: {record.hospNo}</span>
+                                  </div>
                                 </div>
-                              )}
-                            </div>
-                          </motion.div>
-                        );
-                      })}
+
+                                {/* Reference Number - Centered and Styled */}
+                                <div className="hidden lg:flex flex-col items-center justify-center px-8 border-x border-gray-100/50">
+                                  <span className="text-[8px] font-black text-gray-300 uppercase tracking-widest mb-1">Reference No</span>
+                                  <span className={`text-sm font-black tracking-widest ${isSelected ? 'text-cyan-600' : 'text-gray-500'}`}>
+                                    {record.refNo}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-10 shrink-0 ml-8 z-10">
+                                {/* Amount */}
+                                <div className="flex flex-col items-end min-w-[120px]">
+                                  <span className="text-[9px] font-black text-gray-300 uppercase tracking-widest mb-1">Amount</span>
+                                  <span className={`text-2xl font-black tracking-tighter ${isSelected ? 'text-cyan-700' : isReported ? 'text-emerald-600' : 'text-[#0da2c2]'}`}>
+                                    ₱ {((r) => {
+                                      const val = (r.amount || r.pfAmount || '0').replace(/[^\d.]/g, '');
+                                      return (parseFloat(val) || 0).toLocaleString(undefined, { minimumFractionDigits: 2 });
+                                    })(record)}
+                                  </span>
+                                </div>
+
+                                {/* Service Month Badge/Editor */}
+                                {isReported && (
+                                  <div className="flex items-center bg-white shadow-inner border border-gray-100 rounded-2xl p-2 px-4 gap-4" onClick={(e) => e.stopPropagation()}>
+                                    <div className="flex flex-col">
+                                      <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5 leading-none">Service Month</span>
+                                      {isAdminMode ? (
+                                        <input 
+                                          type="month"
+                                          value={record.maifippServiceMonth || ''}
+                                          onChange={(e) => {
+                                            setRecords(prev => prev.map(r => r.id === record.id ? { 
+                                              ...r, 
+                                              maifippServiceMonth: e.target.value 
+                                            } : r));
+                                          }}
+                                          className="bg-transparent border-none p-0 text-sm font-black text-[#095161] focus:ring-0 outline-none w-28"
+                                        />
+                                      ) : (
+                                        <span className="text-sm font-black text-[#095161]">{record.maifippServiceMonth || 'N/A'}</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+                    </AnimatePresence>
                   </div>
                 </div>
-              </div>
 
-              <div className="p-8 pt-0 flex justify-end">
+              {/* Footer */}
+              <div className="p-10 pt-0 flex justify-end bg-white">
                 <button 
                   onClick={() => setShowMaifippModal(false)}
-                  className="px-10 py-4 bg-[#095161] text-white font-black text-xs uppercase tracking-[0.2em] rounded-2xl hover:bg-[#0b6377] transition-all shadow-lg active:scale-95"
+                  className="px-14 py-5 bg-[#095161] text-white font-black text-sm uppercase tracking-[0.3em] rounded-[1.5rem] hover:bg-[#073d4a] transition-all shadow-2xl shadow-[#095161]/30 active:scale-95 flex items-center gap-3 group"
                 >
+                  <X className="w-5 h-5 group-hover:rotate-90 transition-transform" />
                   Close Manager
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Add Modality Modal */}
+      <AnimatePresence>
+        {showAddModalityModal && (
+          <div className="fixed inset-0 z-[60000] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowAddModalityModal(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-[2.5rem] shadow-2xl overflow-hidden border border-white/20"
+            >
+              <div className="p-8">
+                <div className="flex items-center gap-4 mb-6">
+                  <div className="w-12 h-12 bg-[#095161]/10 rounded-2xl flex items-center justify-center">
+                    <Plus className="w-6 h-6 text-[#095161]" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-gray-800">Add New Modality</h3>
+                    <p className="text-xs text-gray-400 font-bold uppercase tracking-wider">System Configuration</p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">Modality Name</label>
+                    <input
+                      type="text"
+                      autoFocus
+                      placeholder="e.g. ULTRASOUND"
+                      value={modalityInput}
+                      onChange={(e) => setModalityInput(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAddModality()}
+                      className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl focus:border-[#095161] focus:bg-white outline-none transition-all font-bold text-gray-700"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-3 mt-8">
+                  <button
+                    onClick={() => setShowAddModalityModal(false)}
+                    className="flex-1 py-4 bg-slate-100 text-slate-500 font-black text-xs uppercase tracking-widest rounded-2xl hover:bg-slate-200 active:scale-95 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddModality}
+                    disabled={!modalityInput.trim()}
+                    className="flex-1 py-4 bg-[#095161] text-white font-black text-xs uppercase tracking-widest rounded-2xl hover:bg-[#0b6377] active:scale-95 transition-all disabled:opacity-50 shadow-lg shadow-cyan-900/20"
+                  >
+                    Confirm
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* User History Modal */}
+      <AnimatePresence>
+        {showHistoryModal && selectedUserForHistory && (
+          <div className="fixed inset-0 z-[60000] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setShowHistoryModal(false);
+                setSelectedUserForHistory(null);
+              }}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-[2.5rem] shadow-2xl overflow-hidden border border-white/20"
+            >
+              <div className="p-8">
+                <div className="flex items-center justify-between mb-8">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 bg-[#095161]/10 rounded-2xl flex items-center justify-center">
+                      <Clock className="w-6 h-6 text-[#095161]" />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-black text-gray-800">Login History</h3>
+                      <p className="text-xs text-[#095161] font-black uppercase tracking-widest">{selectedUserForHistory.username}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setShowHistoryModal(false);
+                        setSelectedUserForHistory(null);
+                        setHistoryStartDate('');
+                        setHistoryEndDate('');
+                        setShowClearedHistory(false);
+                      }}
+                      className="p-2 hover:bg-slate-100 rounded-xl transition-all"
+                    >
+                      <X className="w-5 h-5 text-gray-400" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Filters Row */}
+                <div className="grid grid-cols-2 gap-3 mb-6 bg-slate-50 p-4 rounded-3xl border border-slate-100">
+                  <div className="space-y-1">
+                    <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Start Date</label>
+                    <input 
+                      type="date"
+                      value={historyStartDate}
+                      onChange={(e) => setHistoryStartDate(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-[11px] font-bold text-gray-600 outline-none focus:border-[#095161] transition-all cursor-pointer"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">End Date</label>
+                    <input 
+                      type="date"
+                      value={historyEndDate}
+                      onChange={(e) => setHistoryEndDate(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-[11px] font-bold text-gray-600 outline-none focus:border-[#095161] transition-all cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Log List */}
+                <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                  {(() => {
+                    const displayHistory = (selectedUserForHistory.loginHistory || []);
+
+                    const filteredHistory = displayHistory.filter((h: any) => {
+                      const timestamp = new Date(h.timestamp).getTime();
+                      if (historyStartDate) {
+                        const start = new Date(historyStartDate);
+                        start.setHours(0, 0, 0, 0);
+                        if (timestamp < start.getTime()) return false;
+                      }
+                      if (historyEndDate) {
+                        const end = new Date(historyEndDate);
+                        end.setHours(23, 59, 59, 999);
+                        if (timestamp > end.getTime()) return false;
+                      }
+                      return true;
+                    });
+
+                    if (filteredHistory.length === 0) {
+                      return (
+                        <div className="text-center py-12">
+                          <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <Clock className="w-8 h-8 text-slate-200" />
+                          </div>
+                          <p className="text-sm font-bold text-slate-400">No History of Log-in</p>
+                        </div>
+                      );
+                    }
+
+                    return filteredHistory.map((h: any, idx: number) => {
+                      return (
+                        <div 
+                          key={idx} 
+                          className="flex gap-4 p-4 rounded-2xl border transition-all bg-slate-50/50 border-slate-100 items-center"
+                        >
+                          <div className="w-10 h-10 bg-white border-slate-100 text-[#095161] rounded-xl shadow-sm border flex items-center justify-center flex-shrink-0 transition-colors">
+                            <CheckCircle2 className="w-5 h-5" />
+                          </div>
+                          <div className="flex-1">
+                            <p className="text-[11px] font-black text-gray-700">
+                              {new Date(h.timestamp).toLocaleString()}
+                            </p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-[9px] font-bold uppercase tracking-widest text-gray-400">
+                                {h.platform || 'Unknown Platform'}
+                              </span>
+                              <div className="w-1 h-1 rounded-full bg-gray-200" />
+                              <span className="text-[9px] font-bold truncate max-w-[200px] text-gray-400" title={h.userAgent}>
+                                {h.userAgent || 'No data'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+
+                <button
+                  onClick={() => {
+                    setShowHistoryModal(false);
+                    setSelectedUserForHistory(null);
+                    setHistoryStartDate('');
+                    setHistoryEndDate('');
+                    setShowClearedHistory(false);
+                    setSelectedHistoryItems(new Set());
+                  }}
+                  className="w-full mt-8 py-4 bg-slate-100 text-slate-500 font-black text-xs uppercase tracking-widest rounded-2xl hover:bg-slate-200 active:scale-95 transition-all"
+                >
+                  Close History
                 </button>
               </div>
             </motion.div>

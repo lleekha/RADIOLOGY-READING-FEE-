@@ -6,7 +6,7 @@ interface AuthProps {
   onLogin: (username: string, modality: string) => void;
 }
 
-const DEFAULT_MODALITIES = [
+const INITIAL_MODALITIES = [
   "X-RAY", 
   "X-RAY MAIN", 
   "X-RAY OPD", 
@@ -20,6 +20,14 @@ const DEFAULT_MODALITIES = [
 ];
 
 export default function Auth({ onLogin }: AuthProps) {
+  const getModalities = () => {
+    const stored = localStorage.getItem('claim_slip_modalities');
+    if (stored) return JSON.parse(stored);
+    localStorage.setItem('claim_slip_modalities', JSON.stringify(INITIAL_MODALITIES));
+    return INITIAL_MODALITIES;
+  };
+
+  const [modalities] = useState<string[]>(getModalities());
   const [isLogin, setIsLogin] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [formData, setFormData] = useState({
@@ -174,6 +182,27 @@ export default function Auth({ onLogin }: AuthProps) {
         return;
       }
 
+      // Update login history and lastActive
+      const loginEvent = {
+        timestamp: new Date().toISOString(),
+        action: 'LOGIN',
+        platform: navigator.platform,
+        userAgent: navigator.userAgent
+      };
+
+      const updatedUsers = storedUsers.map((u: any) => {
+        if (u.username === userByUsername.username) {
+          const history = u.loginHistory || [];
+          return { 
+            ...u, 
+            lastActive: new Date().toISOString(),
+            loginHistory: [loginEvent, ...history].slice(0, 50) // Keep last 50
+          };
+        }
+        return u;
+      });
+      localStorage.setItem('claim_slip_users', JSON.stringify(updatedUsers));
+
       onLogin(userByUsername.username, userByUsername.modality || 'ALL');
     } else {
       // Signup Logic
@@ -247,6 +276,21 @@ export default function Auth({ onLogin }: AuthProps) {
   const handleOTPVerify = (e: React.FormEvent) => {
     e.preventDefault();
     if (otpInput === generatedOTP) {
+      // Record ADMIN login
+      const storedUsers = JSON.parse(localStorage.getItem('claim_slip_users') || '[]');
+      const loginEvent = {
+        timestamp: new Date().toISOString(),
+        action: 'LOGIN',
+        platform: navigator.platform,
+        userAgent: navigator.userAgent
+      };
+      
+      const adminUser = storedUsers.find((u: any) => u.username === 'ADMIN') || { username: 'ADMIN' };
+      const updatedUsers = storedUsers.some((u: any) => u.username === 'ADMIN')
+        ? storedUsers.map((u: any) => u.username === 'ADMIN' ? { ...u, lastActive: new Date().toISOString(), loginHistory: [loginEvent, ...(u.loginHistory || [])].slice(0, 50) } : u)
+        : [...storedUsers, { ...adminUser, lastActive: new Date().toISOString(), loginHistory: [loginEvent] }];
+      
+      localStorage.setItem('claim_slip_users', JSON.stringify(updatedUsers));
       onLogin('ADMIN', 'ALL');
     } else {
       setOtpError('Invalid OTP code. Access denied.');
@@ -604,7 +648,7 @@ export default function Auth({ onLogin }: AuthProps) {
                     className="w-full pl-11 pr-4 py-3 bg-gray-50 border-2 border-gray-100 rounded-xl focus:border-[#095161] focus:bg-white outline-none transition-all text-gray-700 appearance-none font-bold"
                   >
                     <option value="">Select your modality</option>
-                    {DEFAULT_MODALITIES.map(mod => (
+                    {modalities.map(mod => (
                       <option key={mod} value={mod}>{mod}</option>
                     ))}
                   </select>
